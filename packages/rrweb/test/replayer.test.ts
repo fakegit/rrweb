@@ -1,22 +1,40 @@
-/* tslint:disable no-string-literal no-console */
-
 import * as fs from 'fs';
 import * as path from 'path';
 import type * as puppeteer from 'puppeteer';
+import { vi } from 'vitest';
+import 'construct-style-sheets-polyfill';
 import {
   assertDomSnapshot,
   launchPuppeteer,
   sampleEvents as events,
   sampleStyleSheetRemoveEvents as stylesheetRemoveEvents,
+  sampleRemoteStyleSheetEvents as remoteStyleSheetEvents,
   waitForRAF,
 } from './utils';
 import styleSheetRuleEvents from './events/style-sheet-rule-events';
 import orderingEvents from './events/ordering';
 import scrollEvents from './events/scroll';
+import scrollWithParentStylesEvents from './events/scroll-with-parent-styles';
 import inputEvents from './events/input';
 import iframeEvents from './events/iframe';
+import selectionEvents from './events/selection';
 import shadowDomEvents from './events/shadow-dom';
+import badTextareaEvents from './events/bad-textarea';
+import badStyleEvents from './events/bad-style';
 import StyleSheetTextMutation from './events/style-sheet-text-mutation';
+import canvasInIframe from './events/canvas-in-iframe';
+import adoptedStyleSheet from './events/adopted-style-sheet';
+import adoptedStyleSheetModification from './events/adopted-style-sheet-modification';
+import {
+  emptyReplaceSyncEvents,
+  emptyReplaceEvents,
+} from './events/adopted-style-sheet-empty-replace';
+import nestedStyleDeclarationEvents from './events/nested-style-declaration';
+import styleDeclarationMissingRuleEvents from './events/style-declaration-missing-rule';
+import documentReplacementEvents from './events/document-replacement';
+import hoverInIframeShadowDom from './events/iframe-shadowdom-hover';
+import customElementDefineClass from './events/custom-element-define-class';
+import { ReplayerEvents } from '@rrweb/types';
 
 interface ISuite {
   code: string;
@@ -24,8 +42,11 @@ interface ISuite {
   page: puppeteer.Page;
 }
 
+type IWindow = Window &
+  typeof globalThis & { rrweb: typeof import('../src'); events: typeof events };
+
 describe('replayer', function () {
-  jest.setTimeout(10_000);
+  vi.setConfig({ testTimeout: 10_000 });
 
   let code: ISuite['code'];
   let browser: ISuite['browser'];
@@ -34,7 +55,7 @@ describe('replayer', function () {
   beforeAll(async () => {
     browser = await launchPuppeteer();
 
-    const bundlePath = path.resolve(__dirname, '../dist/rrweb.min.js');
+    const bundlePath = path.resolve(__dirname, '../dist/rrweb.umd.cjs');
     code = fs.readFileSync(bundlePath, 'utf8');
   });
 
@@ -42,7 +63,7 @@ describe('replayer', function () {
     page = await browser.newPage();
     await page.goto('about:blank');
     await page.evaluate(code);
-    await page.evaluate(`let events = ${JSON.stringify(events)}`);
+    await page.evaluate(`var events = ${JSON.stringify(events)}`);
 
     page.on('console', (msg) => console.log('PAGE LOG:', msg.text()));
   });
@@ -65,6 +86,147 @@ describe('replayer', function () {
       startTime: events[0].timestamp,
       endTime: events[events.length - 1].timestamp,
       totalTime: events[events.length - 1].timestamp - events[0].timestamp,
+    });
+  });
+
+  it('creates a replay iframe with the supported sandbox policy', async () => {
+    const sandbox = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.iframe.getAttribute('sandbox');
+    `);
+
+    expect(sandbox).toBe('allow-same-origin');
+  });
+
+  it('keeps UNSAFE_replayCanvas explicit by using an unprotected sandbox policy', async () => {
+    const sandbox = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events, { UNSAFE_replayCanvas: true });
+      replayer.iframe.getAttribute('sandbox');
+    `);
+
+    expect(sandbox).toBe('allow-same-origin allow-scripts');
+  });
+
+  it('can rebuild the first full snapshot with the default sandbox policy', async () => {
+    const rebuiltSnapshotContent = await page.evaluate(`
+      (async () => {
+        const { Replayer, ReplayerEvents } = rrweb;
+        const replayer = new Replayer(events);
+
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error('Timed out waiting for full snapshot rebuild')),
+            1000,
+          );
+          replayer.on(ReplayerEvents.FullsnapshotRebuilded, () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+          replayer.play(0);
+        });
+
+        const doc = replayer.iframe.contentDocument;
+        return {
+          sandbox: replayer.iframe.getAttribute('sandbox'),
+          htmlTag: doc.documentElement.localName,
+          headTag: doc.head.localName,
+          headChildElementCount: doc.head.childElementCount,
+          bodyTag: doc.body.localName,
+          bodyChildElementCount: doc.body.childElementCount,
+          bodyText: doc.body.textContent,
+        };
+      })();
+    `);
+
+    expect(rebuiltSnapshotContent).toEqual({
+      sandbox: 'allow-same-origin',
+      htmlTag: 'html',
+      headTag: 'head',
+      headChildElementCount: 0,
+      bodyTag: 'body',
+      bodyChildElementCount: 0,
+      bodyText: '',
+    });
+  });
+
+  it('can rebuild the first full snapshot when UNSAFE_replayCanvas is enabled', async () => {
+    const rebuiltSnapshotContent = await page.evaluate(`
+      (async () => {
+        const { Replayer, ReplayerEvents } = rrweb;
+        const replayer = new Replayer(events, { UNSAFE_replayCanvas: true });
+
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error('Timed out waiting for full snapshot rebuild')),
+            1000,
+          );
+          replayer.on(ReplayerEvents.FullsnapshotRebuilded, () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+          replayer.play(0);
+        });
+
+        const doc = replayer.iframe.contentDocument;
+        return {
+          htmlTag: doc.documentElement.localName,
+          headTag: doc.head.localName,
+          headChildElementCount: doc.head.childElementCount,
+          bodyTag: doc.body.localName,
+          bodyChildElementCount: doc.body.childElementCount,
+          bodyText: doc.body.textContent,
+        };
+      })();
+    `);
+
+    expect(rebuiltSnapshotContent).toEqual({
+      htmlTag: 'html',
+      headTag: 'head',
+      headChildElementCount: 0,
+      bodyTag: 'body',
+      bodyChildElementCount: 0,
+      bodyText: '',
+    });
+  });
+
+  it('can rebuild a UNSAFE_replayCanvas iframe after setConfig disables the option', async () => {
+    const rebuiltSnapshotContent = await page.evaluate(`
+      (async () => {
+        const { Replayer, ReplayerEvents } = rrweb;
+        const replayer = new Replayer(events, { UNSAFE_replayCanvas: true });
+        replayer.setConfig({ UNSAFE_replayCanvas: false });
+
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error('Timed out waiting for full snapshot rebuild')),
+            1000,
+          );
+          replayer.on(ReplayerEvents.FullsnapshotRebuilded, () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+          replayer.play(0);
+        });
+
+        const doc = replayer.iframe.contentDocument;
+        return {
+          sandbox: replayer.iframe.getAttribute('sandbox'),
+          htmlTag: doc.documentElement.localName,
+          headTag: doc.head.localName,
+          bodyTag: doc.body.localName,
+          bodyText: doc.body.textContent,
+        };
+      })();
+    `);
+
+    expect(rebuiltSnapshotContent).toEqual({
+      sandbox: 'allow-same-origin allow-scripts',
+      htmlTag: 'html',
+      headTag: 'head',
+      bodyTag: 'body',
+      bodyText: '',
     });
   });
 
@@ -160,11 +322,7 @@ describe('replayer', function () {
       ).length,
     );
 
-    await assertDomSnapshot(
-      page,
-      __filename,
-      'style-sheet-rule-events-play-at-1500',
-    );
+    await assertDomSnapshot(page);
   });
 
   it('should apply fast forwarded StyleSheetRules that where added', async () => {
@@ -196,21 +354,66 @@ describe('replayer', function () {
       ).length,
     );
 
-    await assertDomSnapshot(
-      page,
-      __filename,
-      'style-sheet-remove-events-play-at-2500',
+    await assertDomSnapshot(page);
+  });
+
+  it('can handle remote stylesheets', async () => {
+    await page.evaluate(`events = ${JSON.stringify(remoteStyleSheetEvents)}`);
+    const actionLength = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.play(2500);
+      replayer['timer']['actions'].length;
+    `);
+    expect(actionLength).toEqual(
+      remoteStyleSheetEvents.filter(
+        (e) => e.timestamp - remoteStyleSheetEvents[0].timestamp >= 2500,
+      ).length,
     );
+
+    await assertDomSnapshot(page);
+  });
+
+  it('can fast forward selection events', async () => {
+    await page.evaluate(`events = ${JSON.stringify(selectionEvents)}`);
+
+    /** check the first selection event */
+    let [startOffset, endOffset] = (await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(360);
+      var range = replayer.iframe.contentDocument.getSelection().getRangeAt(0);
+      [range.startOffset, range.endOffset];
+    `)) as [startOffset: number, endOffset: number];
+
+    expect(startOffset).toEqual(5);
+    expect(endOffset).toEqual(15);
+
+    await page.evaluate('replayer.play(0);');
+    await waitForRAF(page);
+
+    /** check the second selection event */
+    [startOffset, endOffset] = (await page.evaluate(`      
+      replayer.pause(410);
+      var range = replayer.iframe.contentDocument.getSelection().getRangeAt(0);
+      [range.startOffset, range.endOffset];
+    `)) as [startOffset: number, endOffset: number];
+
+    expect(startOffset).toEqual(11);
+    expect(endOffset).toEqual(6);
   });
 
   it('can fast forward past StyleSheetRule deletion on virtual elements', async () => {
     await page.evaluate(`events = ${JSON.stringify(styleSheetRuleEvents)}`);
 
-    await assertDomSnapshot(
-      page,
-      __filename,
-      'style-sheet-rule-events-play-at-2500',
-    );
+    const actionLength = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(2600);
+      replayer['timer']['actions'].length;
+    `);
+
+    await assertDomSnapshot(page);
   });
 
   it('should delete fast forwarded StyleSheetRules that where removed', async () => {
@@ -376,6 +579,51 @@ describe('replayer', function () {
     ).toEqual(0);
   });
 
+  it('can fast forward scroll events w/ a parent node that affects a child nodes height', async () => {
+    await page.evaluate(`
+      events = ${JSON.stringify(scrollWithParentStylesEvents)};
+      const { Replayer } = rrweb;
+      var replayer = new Replayer(events,{showDebug:true});
+      replayer.pause(550);
+    `);
+    // add the ".container" element at 500
+    const iframe = await page.$('iframe');
+    const contentDocument = await iframe!.contentFrame()!;
+    expect(await contentDocument!.$('.container')).not.toBeNull();
+    expect(
+      await contentDocument!.$eval(
+        '.container',
+        (element: Element) => element.scrollTop,
+      ),
+    ).toEqual(0);
+
+    // restart the replayer
+    await page.evaluate('replayer.play(0);');
+    await waitForRAF(page);
+
+    await page.evaluate('replayer.pause(1050);');
+    // scroll the ".container" div' at 1000
+    expect(
+      await contentDocument!.$eval(
+        '.container',
+        (element: Element) => element.scrollTop,
+      ),
+    ).toEqual(800);
+
+    await page.evaluate('replayer.play(0);');
+    await waitForRAF(page);
+    await page.evaluate('replayer.pause(2050);');
+    // remove the ".container" element at 2000
+    expect(await contentDocument!.$('.container')).toBeNull();
+    expect(
+      await page.$eval(
+        'iframe',
+        (element: Element) =>
+          (element as HTMLIFrameElement)!.contentWindow!.scrollY,
+      ),
+    ).toEqual(0);
+  });
+
   it('can fast forward input events', async () => {
     await page.evaluate(`
       events = ${JSON.stringify(inputEvents)};
@@ -499,7 +747,7 @@ describe('replayer', function () {
     expect(iframeTwoDocument).not.toBeNull();
     expect((await iframeTwoDocument!.$$('iframe')).length).toEqual(2);
     expect((await iframeTwoDocument!.$$('style')).length).toBe(1);
-    let iframeThreeDocument = await (
+    const iframeThreeDocument = await (
       await iframeTwoDocument!.$$('iframe')
     )[0]!.contentFrame();
     let iframeFourDocument = await (
@@ -565,7 +813,9 @@ describe('replayer', function () {
     expect(
       await iframeTwoDocument!.evaluate(
         (iframe) => (iframe as HTMLIFrameElement)!.contentDocument!.doctype,
-        (await iframeTwoDocument!.$$('iframe'))[1],
+        (
+          await iframeTwoDocument!.$$('iframe')
+        )[1],
       ),
     ).not.toBeNull();
   });
@@ -615,6 +865,31 @@ describe('replayer', function () {
     ).toEqual('shadow dom two');
   });
 
+  it('can fast-forward mutation events containing painted canvas in iframe', async () => {
+    await page.evaluate(`
+      events = ${JSON.stringify(canvasInIframe)};
+      const { Replayer } = rrweb;
+      var replayer = new Replayer(events,{showDebug:true});
+      replayer.pause(550);            
+    `);
+    const replayerIframe = await page.$('iframe');
+    const contentDocument = await replayerIframe!.contentFrame()!;
+    const iframe = await contentDocument!.$('iframe');
+    expect(iframe).not.toBeNull();
+    const docInIFrame = await iframe?.contentFrame();
+    expect(docInIFrame).not.toBeNull();
+    const canvasElements = await docInIFrame!.$$('canvas');
+    // The first canvas is a blank one and the second is a painted one.
+    expect(canvasElements.length).toEqual(2);
+
+    const dataUrls = await docInIFrame?.$$eval('canvas', (elements) =>
+      elements.map((element) => (element as HTMLCanvasElement).toDataURL()),
+    );
+    expect(dataUrls?.length).toEqual(2);
+    // The painted canvas's data should not be empty.
+    expect(dataUrls![1]).not.toEqual(dataUrls![0]);
+  });
+
   it('can stream events in live mode', async () => {
     const status = await page.evaluate(`
       const { Replayer } = rrweb;
@@ -627,6 +902,38 @@ describe('replayer', function () {
     expect(status).toEqual('live');
   });
 
+  it("shouldn't finish in live mode", async () => {
+    const { status, timeProgress } = await page.evaluate((FinishState) => {
+      return new Promise((resolve) => {
+        const win = window as IWindow;
+        let triggeredFinish = false;
+        const { Replayer } = win.rrweb;
+        const replayer = new Replayer([], {
+          liveMode: true,
+        });
+        replayer.on(FinishState, () => {
+          triggeredFinish = true;
+        });
+        replayer.startLive();
+        replayer.addEvent(win.events[0]);
+        requestAnimationFrame(() => {
+          const afterLastEventTime = replayer.getCurrentTime();
+          requestAnimationFrame(() => {
+            const aff = replayer.getCurrentTime();
+            const timeProgress = aff - afterLastEventTime;
+            resolve({
+              status: triggeredFinish,
+              timeProgress,
+            });
+          });
+        });
+      });
+    }, ReplayerEvents.Finish);
+
+    expect(status).toEqual(false);
+    expect(timeProgress).toBeGreaterThan(0);
+  });
+
   it('replays same timestamp events in correct order', async () => {
     await page.evaluate(`events = ${JSON.stringify(orderingEvents)}`);
     await page.evaluate(`
@@ -636,7 +943,7 @@ describe('replayer', function () {
     `);
     await page.waitForTimeout(50);
 
-    await assertDomSnapshot(page, __filename, 'ordering-events');
+    await assertDomSnapshot(page);
   });
 
   it('replays same timestamp events in correct order (with addAction)', async () => {
@@ -650,6 +957,580 @@ describe('replayer', function () {
     `);
     await page.waitForTimeout(50);
 
-    await assertDomSnapshot(page, __filename, 'ordering-events');
+    await assertDomSnapshot(page);
+  });
+
+  it('should destroy the replayer after calling destroy()', async () => {
+    await page.evaluate(`events = ${JSON.stringify(events)}`);
+    await page.evaluate(`
+      const { Replayer } = rrweb;
+      let replayer = new Replayer(events);
+      replayer.play();      
+    `);
+
+    const replayerWrapperClassName = 'replayer-wrapper';
+    let wrapper = await page.$(`.${replayerWrapperClassName}`);
+    expect(wrapper).not.toBeNull();
+
+    await page.evaluate(`replayer.destroy(); replayer = null;`);
+    wrapper = await page.$(`.${replayerWrapperClassName}`);
+    expect(wrapper).toBeNull();
+  });
+
+  it('can replay adopted stylesheet events', async () => {
+    await page.evaluate(`
+      events = ${JSON.stringify(adoptedStyleSheet)};
+      const { Replayer } = rrweb;
+      var replayer = new Replayer(events,{showDebug:true});
+      replayer.play();
+    `);
+    await page.waitForTimeout(600);
+    const iframe = await page.$('iframe');
+    const contentDocument = await iframe!.contentFrame()!;
+    const colorRGBMap = {
+      yellow: 'rgb(255, 255, 0)',
+      red: 'rgb(255, 0, 0)',
+      blue: 'rgb(0, 0, 255)',
+      green: 'rgb(0, 128, 0)',
+    };
+    const checkCorrectness = async () => {
+      // check the adopted stylesheet is applied on the outermost document
+      expect(
+        await contentDocument!.$eval(
+          'div',
+          (element) => window.getComputedStyle(element).color,
+        ),
+      ).toEqual(colorRGBMap.yellow);
+
+      // check the adopted stylesheet is applied on the shadow dom #1's root
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            window.getComputedStyle(
+              document
+                .querySelector('#shadow-host1')!
+                .shadowRoot!.querySelector('span')!,
+            ).color,
+        ),
+      ).toEqual(colorRGBMap.red);
+
+      // check the adopted stylesheet is applied on document of the IFrame element
+      expect(
+        await contentDocument!.$eval(
+          'iframe',
+          (element) =>
+            window.getComputedStyle(
+              (element as HTMLIFrameElement).contentDocument!.querySelector(
+                'h1',
+              )!,
+            ).color,
+        ),
+      ).toEqual(colorRGBMap.blue);
+
+      // check the adopted stylesheet is applied on the shadow dom #2's root
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            window.getComputedStyle(
+              document
+                .querySelector('#shadow-host2')!
+                .shadowRoot!.querySelector('span')!,
+            ).color,
+        ),
+      ).toEqual(colorRGBMap.green);
+    };
+    await checkCorrectness();
+
+    // To test the correctness of replaying adopted stylesheet events in the fast-forward mode.
+    await page.evaluate('replayer.play(0);');
+    await waitForRAF(page);
+    await page.evaluate('replayer.pause(600);');
+    await checkCorrectness();
+  });
+
+  it('can replay modification events for adoptedStyleSheet', async () => {
+    await page.evaluate(`
+    events = ${JSON.stringify(adoptedStyleSheetModification)};
+    const { Replayer } = rrweb;
+    var replayer = new Replayer(events,{showDebug:true});
+    replayer.pause(0);
+
+    async function playTill(offsetTime) {
+      replayer.play();
+      return new Promise((resolve) => {
+        const checkTime = () => {
+          if (replayer.getCurrentTime() >= offsetTime) {
+            replayer.pause();
+            resolve(undefined);
+          } else {
+            requestAnimationFrame(checkTime);
+          }
+        };
+        checkTime();
+      });
+    }`);
+
+    const iframe = await page.$('iframe');
+    const contentDocument = await iframe!.contentFrame()!;
+
+    // At 250ms, the adopted stylesheet is still empty.
+    const check250ms = async () => {
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.adoptedStyleSheets.length === 1 &&
+            document.adoptedStyleSheets[0].cssRules.length === 0,
+        ),
+      ).toBeTruthy();
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets.length === 1 &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules.length === 0,
+        ),
+      ).toBeTruthy();
+    };
+
+    // At 300ms, the adopted stylesheet is replaced with new content.
+    const check300ms = async () => {
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.adoptedStyleSheets[0].cssRules[0].cssText ===
+              'div { color: yellow; }',
+        ),
+      ).toBeTruthy();
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules[0].cssText ===
+              'h1 { color: blue; }',
+        ),
+      ).toBeTruthy();
+    };
+
+    // At 400ms, check replaceSync API.
+    const check400ms = async () => {
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.adoptedStyleSheets[0].cssRules[0].cssText ===
+              'div { display: inline; }',
+        ),
+      ).toBeTruthy();
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules[0].cssText ===
+              'h1 { font-size: large; }',
+        ),
+      ).toBeTruthy();
+    };
+
+    // At 500ms, check CSSStyleDeclaration API.
+    const check500ms = async () => {
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.adoptedStyleSheets[0].cssRules[0].cssText ===
+              'div { color: green; }',
+        ),
+      ).toBeTruthy();
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules.length === 2 &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules[0].cssText ===
+              'h2 { color: red; }' &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules[1].cssText ===
+              'h1 { font-size: medium !important; }',
+        ),
+      ).toBeTruthy();
+    };
+
+    // At 600ms, check insertRule and deleteRule API.
+    const check600ms = async () => {
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.adoptedStyleSheets[0].cssRules.length === 2 &&
+            document.adoptedStyleSheets[0].cssRules[0].cssText ===
+              'div { color: green; }' &&
+            document.adoptedStyleSheets[0].cssRules[1].cssText ===
+              'body { border: 2px solid blue; }',
+        ),
+      ).toBeTruthy();
+      expect(
+        await contentDocument!.evaluate(
+          () =>
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules.length === 1 &&
+            document.querySelector('iframe')!.contentDocument!
+              .adoptedStyleSheets[0].cssRules[0].cssText ===
+              'h1 { font-size: medium !important; }',
+        ),
+      ).toBeTruthy();
+    };
+
+    await page.evaluate(`playTill(250)`);
+    await check250ms();
+
+    await page.evaluate(`playTill(300)`);
+    await check300ms();
+
+    await page.evaluate(`playTill(400)`);
+    await check400ms();
+
+    await page.evaluate(`playTill(500)`);
+    await check500ms();
+
+    await page.evaluate(`playTill(600)`);
+    await check600ms();
+
+    // To test the correctness of replaying adopted stylesheet mutation events in the fast-forward mode.
+    await page.evaluate('replayer.play(0);');
+    await waitForRAF(page);
+    await page.evaluate('replayer.pause(280);');
+    await check250ms();
+
+    await page.evaluate('replayer.pause(330);');
+    await check300ms();
+
+    await page.evaluate('replayer.pause(430);');
+    await check400ms();
+
+    await page.evaluate('replayer.pause(530);');
+    await check500ms();
+
+    await page.evaluate('replayer.pause(630);');
+    await check600ms();
+  });
+
+  it('can clear adopted stylesheets with empty replaceSync', async () => {
+    await page.evaluate(`
+      events = ${JSON.stringify(emptyReplaceSyncEvents)};
+
+      const { Replayer } = rrweb;
+      var replayer = new Replayer(events, { showDebug: true });
+      replayer.pause(0);
+    `);
+
+    const iframe = await page.$('iframe');
+    const contentDocument = await iframe!.contentFrame()!;
+
+    // At 250ms, stylesheet should have rules
+    await page.evaluate('replayer.pause(250);');
+    expect(
+      await contentDocument!.evaluate(
+        () =>
+          document.adoptedStyleSheets.length === 1 &&
+          document.adoptedStyleSheets[0].cssRules.length === 1,
+      ),
+    ).toBeTruthy();
+
+    // At 350ms, stylesheet should be empty after replaceSync('')
+    await page.evaluate('replayer.pause(350);');
+    expect(
+      await contentDocument!.evaluate(
+        () =>
+          document.adoptedStyleSheets.length === 1 &&
+          document.adoptedStyleSheets[0].cssRules.length === 0,
+      ),
+    ).toBeTruthy();
+  });
+
+  it('can clear adopted stylesheets with empty replace', async () => {
+    await page.evaluate(`
+    events = ${JSON.stringify(emptyReplaceEvents)};
+    const { Replayer } = rrweb;
+    var replayer = new Replayer(events, { showDebug: true });
+    replayer.pause(0);
+    `);
+
+    const iframe = await page.$('iframe');
+    const contentDocument = await iframe!.contentFrame()!;
+
+    // At 250ms, stylesheet should have rules
+    await page.evaluate('replayer.pause(250);');
+    expect(
+      await contentDocument!.evaluate(
+        () =>
+          document.adoptedStyleSheets.length === 1 &&
+          document.adoptedStyleSheets[0].cssRules.length === 1,
+      ),
+    ).toBeTruthy();
+
+    // At 350ms, stylesheet should be empty after replace('')
+    await page.evaluate('replayer.pause(350);');
+    await contentDocument!.waitForFunction(
+      () =>
+        document.adoptedStyleSheets.length === 1 &&
+        document.adoptedStyleSheets[0].cssRules.length === 0,
+    );
+  });
+
+  it('can replay StyleDeclaration events on nested CSS rules inside @media', async () => {
+    await page.evaluate(`
+      events = ${JSON.stringify(nestedStyleDeclarationEvents)};
+      const { Replayer } = rrweb;
+      var replayer = new Replayer(events, { showDebug: true });
+      replayer.pause(0);
+    `);
+    // At 250ms, setProperty on [0, 0] should change background-color to red
+    const bgColorAfterSet = await page.evaluate(`
+      replayer.pause(250);
+      const doc1 = replayer.iframe.contentDocument;
+      const styleElement1 = doc1.querySelector('head style');
+      const sheet1 = styleElement1?.sheet;
+      if (!sheet1 || sheet1.cssRules.length === 0) 'no sheet';
+      const mediaRule1 = sheet1.cssRules[0];
+      if (!mediaRule1 || !mediaRule1.cssRules) 'no media rule';
+      const nestedRule1 = mediaRule1.cssRules[0];
+      nestedRule1?.style?.backgroundColor || 'no bg color';
+    `);
+    expect(bgColorAfterSet).toBe('red');
+
+    // At 350ms, setProperty on [0, 1] should add font-weight: bold
+    const fontWeightAfterSet = await page.evaluate(`
+      replayer.pause(350);
+      const doc2 = replayer.iframe.contentDocument;
+      const styleElement2 = doc2.querySelector('head style');
+      const sheet2 = styleElement2?.sheet;
+      if (!sheet2) 'no sheet';
+      const mediaRule2 = sheet2.cssRules[0];
+      const secondRule2 = mediaRule2?.cssRules?.[1];
+      secondRule2?.style?.fontWeight || 'no font weight';
+    `);
+    expect(fontWeightAfterSet).toBe('bold');
+
+    // At 450ms, removeProperty on [0, 0] should remove width
+    const widthAfterRemove = await page.evaluate(`
+      replayer.pause(450);
+      const doc3 = replayer.iframe.contentDocument;
+      const styleElement3 = doc3.querySelector('head style');
+      const sheet3 = styleElement3?.sheet;
+      if (!sheet3) 'has width';
+      const mediaRule3 = sheet3.cssRules[0];
+      const nestedRule3 = mediaRule3?.cssRules?.[0];
+      nestedRule3?.style?.width || '';
+    `);
+    expect(widthAfterRemove).toBe('');
+
+    // At 550ms, setProperty on deeply nested [1, 0, 0] should change background-color to purple
+    const deepBgColorAfterSet = await page.evaluate(`
+      replayer.pause(550);
+      const doc4 = replayer.iframe.contentDocument;
+      const styleElement4 = doc4.querySelector('head style');
+      const sheet4 = styleElement4?.sheet;
+      if (!sheet4 || sheet4.cssRules.length < 2) 'no sheet';
+      const supportsRule4 = sheet4.cssRules[1];
+      const mediaRule4 = supportsRule4?.cssRules?.[0];
+      const deepRule4 = mediaRule4?.cssRules?.[0];
+      deepRule4?.style?.backgroundColor || 'no bg color';
+    `);
+    expect(deepBgColorAfterSet).toBe('purple');
+
+    // At 650ms, removeProperty on [1, 0, 0] should remove background-color
+    const deepBgColorAfterRemove = await page.evaluate(`
+      replayer.pause(650);
+      const doc5 = replayer.iframe.contentDocument;
+      const styleElement5 = doc5.querySelector('head style');
+      const sheet5 = styleElement5?.sheet;
+      if (!sheet5 || sheet5.cssRules.length < 2) 'has bg';
+      const supportsRule5 = sheet5.cssRules[1];
+      const mediaRule5 = supportsRule5?.cssRules?.[0];
+      const deepRule5 = mediaRule5?.cssRules?.[0];
+      deepRule5?.style?.backgroundColor || '';
+    `);
+    expect(deepBgColorAfterRemove).toBe('');
+  });
+
+  it('should not crash when StyleDeclaration references non-existent rules', async () => {
+    /**
+     * This test verifies that the replayer gracefully handles StyleDeclaration
+     * events that reference rules which don't exist in the stylesheet.
+     *
+     * This can happen due to:
+     * - Timing issues where StyleDeclaration arrives before StyleSheetRule
+     * - Dynamic stylesheets that aren't fully synchronized
+     * - Event ordering issues during recording
+     *
+     * The replayer should silently skip these instead of crashing.
+     */
+    await page.evaluate(
+      `events = ${JSON.stringify(styleDeclarationMissingRuleEvents)}`,
+    );
+
+    // Should not throw any errors
+    const result = await page.evaluate(`
+      try {
+        const { Replayer } = rrweb;
+        const replayer = new Replayer(events, { showDebug: true });
+        replayer.pause(500); // After all StyleDeclaration events
+        'success';
+      } catch (e) {
+        'error: ' + e.message;
+      }
+    `);
+    expect(result).toBe('success');
+
+    // Verify the existing rule still works (wasn't corrupted)
+    const existingRuleColor = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(500);
+      const doc = replayer.iframe.contentDocument;
+      const style = doc.querySelector('head style');
+      const sheet = style?.sheet;
+      const rule = sheet?.cssRules?.[0];
+      rule?.style?.color || 'no color';
+    `);
+    expect(existingRuleColor).toBe('blue');
+  });
+
+  it('should replay document replacement events without warnings or errors', async () => {
+    await page.evaluate(
+      `events = ${JSON.stringify(documentReplacementEvents)}`,
+    );
+    const warningThrown = vi.fn();
+    page.on('console', warningThrown);
+    const errorThrown = vi.fn();
+    page.on('pageerror', errorThrown);
+    await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.play(500);
+    `);
+    await waitForRAF(page);
+
+    // No warnings should be logged.
+    expect(warningThrown).not.toHaveBeenCalled();
+    // No errors should be thrown.
+    expect(errorThrown).not.toHaveBeenCalled();
+  });
+
+  it('should remove outdated hover styles in iframes and shadow doms', async () => {
+    await page.evaluate(`events = ${JSON.stringify(hoverInIframeShadowDom)}`);
+
+    await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(550);
+    `);
+    const replayerIframe = await page.$('iframe');
+    const contentDocument = await replayerIframe!.contentFrame()!;
+    const iframe = await contentDocument!.$('iframe');
+    expect(iframe).not.toBeNull();
+    const docInIFrame = await iframe?.contentFrame();
+    expect(docInIFrame).not.toBeNull();
+
+    // hover element in iframe at 500ms
+    expect(
+      await docInIFrame?.evaluate(
+        () => document.querySelector('span')?.className,
+      ),
+    ).toBe(':hover');
+    // At this time, there should be no class name in shadow dom
+    expect(
+      await docInIFrame?.evaluate(() => {
+        const shadowRoot = document.querySelector('div')?.shadowRoot;
+        return (shadowRoot?.childNodes[0] as HTMLElement).className;
+      }),
+    ).toBe('');
+
+    // hover element in shadow dom at 1000ms
+    await page.evaluate('replayer.pause(1050);');
+    // :hover style should be removed from iframe
+    expect(
+      await docInIFrame?.evaluate(
+        () => document.querySelector('span')?.className,
+      ),
+    ).toBe('');
+    expect(
+      await docInIFrame?.evaluate(() => {
+        const shadowRoot = document.querySelector('div')?.shadowRoot;
+        return (shadowRoot?.childNodes[0] as HTMLElement).className;
+      }),
+    ).toBe(':hover');
+
+    // hover element in iframe at 1500ms again
+    await page.evaluate('replayer.pause(1550);');
+    // hover style should be removed from shadow dom
+    expect(
+      await docInIFrame?.evaluate(() => {
+        const shadowRoot = document.querySelector('div')?.shadowRoot;
+        return (shadowRoot?.childNodes[0] as HTMLElement).className;
+      }),
+    ).toBe('');
+    expect(
+      await docInIFrame?.evaluate(
+        () => document.querySelector('span')?.className,
+      ),
+    ).toBe(':hover');
+  });
+
+  it('should replay styles with :define pseudo-class', async () => {
+    await page.evaluate(`events = ${JSON.stringify(customElementDefineClass)}`);
+
+    const displayValue = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(200);
+      const customElement = replayer.iframe.contentDocument.querySelector('custom-element');
+      window.getComputedStyle(customElement).display;
+    `);
+    // If the custom element is not defined, the display value will be 'none'.
+    // If the custom element is defined, the display value will be 'block'.
+    expect(displayValue).toEqual('block');
+  });
+
+  it('can deal with legacy duplicate/conflicting values on textareas', async () => {
+    await page.evaluate(`events = ${JSON.stringify(badTextareaEvents)}`);
+
+    const displayValue = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(100);
+      const textarea = replayer.iframe.contentDocument.querySelector('textarea');
+      textarea.value;
+    `);
+    // If the custom element is not defined, the display value will be 'none'.
+    // If the custom element is defined, the display value will be 'block'.
+    expect(displayValue).toEqual('this value is used for replay');
+  });
+
+  it('can deal with duplicate/conflicting values on style elements', async () => {
+    await page.evaluate(`events = ${JSON.stringify(badStyleEvents)}`);
+
+    const changedColors = await page.evaluate(`
+      const { Replayer } = rrweb;
+      const replayer = new Replayer(events);
+      replayer.pause(1000);
+      // Get the color of the elements after applying the style mutation event
+      [
+        replayer.iframe.contentWindow.getComputedStyle(
+          replayer.iframe.contentDocument.querySelector('#one'),
+        ).color,
+        replayer.iframe.contentWindow.getComputedStyle(
+          replayer.iframe.contentDocument.querySelector('#two'),
+        ).color,
+      ];
+`);
+    const newColor = 'rgb(255, 255, 0)'; // yellow
+    expect(changedColors).toEqual([newColor, newColor]);
   });
 });

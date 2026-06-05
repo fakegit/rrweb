@@ -5,11 +5,13 @@
 仅需一个函数调用就可以录制当前页面：
 
 ```js
-const stopFn = rrweb.record({
+import { record } from '@rrweb/record';
+
+const stopFn = record({
   emit(event) {
     // 保存获取到的 event 数据
-  }
-})
+  },
+});
 ```
 
 你可以使用任何方式保存录制的数据，例如通过网络请求将数据传入至后端持久化保存，但请确保：
@@ -19,12 +21,13 @@ const stopFn = rrweb.record({
 
 如果需要手动停止录制，可以调用返回的 `stopFn` 函数。
 
-回放时只需要获取一段录制数据，并传入 rrweb 提供的 Replayer：
+回放时只需要获取一段录制数据，并传入 `Replayer`：
 
 ```js
-const events = GET_YOUR_EVENTS
+import { Replayer } from '@rrweb/replay';
 
-const replayer = new rrweb.Replayer(events);
+const events = GET_YOUR_EVENTS;
+
+const replayer = new Replayer(events);
 replayer.play();
 ```
-
